@@ -6,7 +6,7 @@ from slack_sdk.errors import SlackApiError
 from flask import Flask, render_template_string, request, jsonify, redirect, session
 
 app = Flask(__name__)
-app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'your-secret-key-change-this')
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'ai-slack-bot-secret-key-2025-xyz-12345')
 
 # Store user tokens in memory (in production, use a database)
 user_tokens = {}
@@ -664,3 +664,4 @@ def post():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
+
