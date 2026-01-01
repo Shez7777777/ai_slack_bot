@@ -1,24 +1,38 @@
-# slack_ai_bot.py
+# slack_ai_bot.py (Updated with OAuth)
 import os
 import requests
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
-from flask import Flask, render_template_string, request, jsonify
+from flask import Flask, render_template_string, request, jsonify, redirect, session
 
-# Initialize
 app = Flask(__name__)
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'your-secret-key-change-this')
 
-# Setup Slack
-def setup_slack():
-    slack_token = os.environ.get('SLACK_BOT_TOKEN')
-    return WebClient(token=slack_token)
+# Store user tokens in memory (in production, use a database)
+user_tokens = {}
 
-# Generate message with AI using direct API call (MORE RELIABLE)
+# Slack OAuth Configuration
+SLACK_CLIENT_ID = os.environ.get('SLACK_CLIENT_ID')
+SLACK_CLIENT_SECRET = os.environ.get('SLACK_CLIENT_SECRET')
+REDIRECT_URI = os.environ.get('REDIRECT_URI', 'https://your-app.onrender.com/slack/oauth_redirect')
+
+# Get Slack client for current user
+def get_slack_client():
+    user_id = session.get('user_id')
+    if not user_id or user_id not in user_tokens:
+        return None
+    return WebClient(token=user_tokens[user_id]['access_token'])
+
+# Check if user is authenticated
+def is_authenticated():
+    user_id = session.get('user_id')
+    return user_id and user_id in user_tokens
+
+# Generate message with AI
 def generate_message(prompt):
     try:
         groq_api_key = os.environ.get('GROQ_API_KEY')
         
-        # Direct API call to Groq
         response = requests.post(
             'https://api.groq.com/openai/v1/chat/completions',
             headers={
@@ -69,14 +83,14 @@ def validate_message(message_text):
 # Post to Slack
 def post_to_slack(message_text, channel_id):
     try:
-        client = setup_slack()
+        client = get_slack_client()
+        if not client:
+            return False, "Please authorize with Slack first"
         
-        # Validate first
         is_valid, validation_msg = validate_message(message_text)
         if not is_valid:
             return False, validation_msg
         
-        # Post message
         response = client.chat_postMessage(
             channel=channel_id,
             text=message_text
@@ -89,7 +103,7 @@ def post_to_slack(message_text, channel_id):
     except Exception as e:
         return False, f"Error: {str(e)}"
 
-# HTML Interface
+# HTML Interface with OAuth
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html>
@@ -133,6 +147,71 @@ HTML_TEMPLATE = '''
             font-size: 16px;
         }
         
+        .auth-section {
+            background: #f8f8f8;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+        
+        .auth-section.connected {
+            background: #d4edda;
+            border-color: #c3e6cb;
+        }
+        
+        .auth-status {
+            font-weight: 600;
+            margin-bottom: 15px;
+            font-size: 18px;
+        }
+        
+        .auth-status.connected {
+            color: #155724;
+        }
+        
+        .auth-status.disconnected {
+            color: #721c24;
+        }
+        
+        .slack-btn {
+            display: inline-block;
+            background: #4A154B;
+            color: white;
+            padding: 12px 24px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+        
+        .slack-btn:hover {
+            background: #611f69;
+            transform: translateY(-2px);
+        }
+        
+        .logout-btn {
+            background: #dc3545;
+            border: none;
+            color: white;
+            padding: 10px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            margin-top: 10px;
+        }
+        
+        .logout-btn:hover {
+            background: #c82333;
+        }
+        
+        .workspace-info {
+            margin-top: 15px;
+            color: #155724;
+            font-size: 14px;
+        }
+        
         .input-group {
             margin-bottom: 20px;
         }
@@ -158,6 +237,11 @@ HTML_TEMPLATE = '''
             border-color: #4A154B;
         }
         
+        input:disabled, textarea:disabled {
+            background: #f5f5f5;
+            cursor: not-allowed;
+        }
+        
         textarea {
             resize: vertical;
             min-height: 120px;
@@ -181,7 +265,7 @@ HTML_TEMPLATE = '''
             color: white;
         }
         
-        .generate-btn:hover {
+        .generate-btn:hover:not(:disabled) {
             background: #4A154B;
             transform: translateY(-2px);
         }
@@ -191,12 +275,12 @@ HTML_TEMPLATE = '''
             color: white;
         }
         
-        .post-btn:hover {
+        .post-btn:hover:not(:disabled) {
             background: #1e8f5f;
             transform: translateY(-2px);
         }
         
-        .post-btn:disabled {
+        button:disabled {
             background: #ccc;
             cursor: not-allowed;
             transform: none;
@@ -267,6 +351,11 @@ HTML_TEMPLATE = '''
         .loading.show {
             display: block;
         }
+        
+        .disabled-overlay {
+            opacity: 0.5;
+            pointer-events: none;
+        }
     </style>
 </head>
 <body>
@@ -274,31 +363,70 @@ HTML_TEMPLATE = '''
         <h1>🤖 AI Slack Bot</h1>
         <p class="subtitle">AI-powered automatic posting to Slack</p>
         
-        <div class="message" id="message"></div>
-        
-        <div class="input-group">
-            <label>📝 Channel ID</label>
-            <input type="text" id="channelId" placeholder="e.g., C01234567AB" value="C0A768RCK5W" />
+        <!-- Authentication Section -->
+        <div class="auth-section {% if authenticated %}connected{% endif %}">
+            {% if authenticated %}
+                <div class="auth-status connected">✅ Connected to Slack</div>
+                <div class="workspace-info">
+                    Workspace: {{ workspace_name }}<br>
+                    Team: {{ team_name }}
+                </div>
+                <button class="logout-btn" onclick="logout()">Disconnect</button>
+            {% else %}
+                <div class="auth-status disconnected">🔐 Not Connected</div>
+                <p style="margin-bottom: 15px; color: #666;">
+                    Connect your Slack workspace to start posting
+                </p>
+                <a href="/slack/install" class="slack-btn">
+                    <img src="https://platform.slack-edge.com/img/add_to_slack.png" 
+                         alt="Add to Slack" 
+                         style="vertical-align: middle; height: 40px;">
+                </a>
+            {% endif %}
         </div>
         
-        <div class="input-group">
-            <label>💬 What do you want to post about?</label>
-            <textarea id="prompt" placeholder="e.g., 'Post about AI trends' or 'Share productivity tips'"></textarea>
+        <div class="{% if not authenticated %}disabled-overlay{% endif %}">
+            <div class="message" id="message"></div>
+            
+            <div class="input-group">
+                <label>📝 Channel ID</label>
+                <input type="text" 
+                       id="channelId" 
+                       placeholder="e.g., C01234567AB" 
+                       {% if not authenticated %}disabled{% endif %} />
+                <small style="color: #666; font-size: 12px;">
+                    💡 Right-click channel → View channel details → Copy Channel ID
+                </small>
+            </div>
+            
+            <div class="input-group">
+                <label>💬 What do you want to post about?</label>
+                <textarea id="prompt" 
+                          placeholder="e.g., 'Post about AI trends' or 'Share productivity tips'"
+                          {% if not authenticated %}disabled{% endif %}></textarea>
+            </div>
+            
+            <button class="generate-btn" 
+                    onclick="generatePreview()" 
+                    {% if not authenticated %}disabled{% endif %}>
+                ✨ Generate Preview with AI
+            </button>
+            
+            <div class="loading" id="loading">⏳ AI is generating your message...</div>
+            
+            <div class="preview-box" id="previewBox">
+                <div class="preview-header">📋 Preview:</div>
+                <div class="preview-content" id="previewContent"></div>
+                <div class="char-count" id="charCount"></div>
+            </div>
+            
+            <button class="post-btn" 
+                    id="postBtn" 
+                    onclick="postMessage()" 
+                    disabled>
+                🚀 Post to Slack
+            </button>
         </div>
-        
-        <button class="generate-btn" onclick="generatePreview()">✨ Generate Preview with AI</button>
-        
-        <div class="loading" id="loading">⏳ AI is generating your message...</div>
-        
-        <div class="preview-box" id="previewBox">
-            <div class="preview-header">📋 Preview:</div>
-            <div class="preview-content" id="previewContent"></div>
-            <div class="char-count" id="charCount"></div>
-        </div>
-        
-        <button class="post-btn" id="postBtn" onclick="postMessage()" disabled>
-            🚀 Post to Slack
-        </button>
     </div>
     
     <script>
@@ -388,6 +516,12 @@ HTML_TEMPLATE = '''
             }
         }
         
+        async function logout() {
+            if (confirm('Are you sure you want to disconnect from Slack?')) {
+                window.location.href = '/slack/logout';
+            }
+        }
+        
         function showMessage(text, type) {
             const messageDiv = document.getElementById('message');
             messageDiv.textContent = text;
@@ -398,12 +532,90 @@ HTML_TEMPLATE = '''
 </html>
 '''
 
+# Routes
 @app.route('/')
 def home():
-    return render_template_string(HTML_TEMPLATE)
+    authenticated = is_authenticated()
+    workspace_name = ""
+    team_name = ""
+    
+    if authenticated:
+        user_id = session.get('user_id')
+        workspace_name = user_tokens[user_id].get('team_name', 'Unknown')
+        team_name = user_tokens[user_id].get('team_id', 'Unknown')
+    
+    return render_template_string(
+        HTML_TEMPLATE, 
+        authenticated=authenticated,
+        workspace_name=workspace_name,
+        team_name=team_name
+    )
+
+@app.route('/slack/install')
+def slack_install():
+    # Redirect user to Slack OAuth page
+    slack_auth_url = (
+        f"https://slack.com/oauth/v2/authorize?"
+        f"client_id={SLACK_CLIENT_ID}&"
+        f"scope=chat:write,channels:read&"
+        f"redirect_uri={REDIRECT_URI}"
+    )
+    return redirect(slack_auth_url)
+
+@app.route('/slack/oauth_redirect')
+def slack_oauth_redirect():
+    # Get the authorization code from Slack
+    code = request.args.get('code')
+    
+    if not code:
+        return "Error: No authorization code received", 400
+    
+    try:
+        # Exchange code for access token
+        response = requests.post(
+            'https://slack.com/api/oauth.v2.access',
+            data={
+                'client_id': SLACK_CLIENT_ID,
+                'client_secret': SLACK_CLIENT_SECRET,
+                'code': code,
+                'redirect_uri': REDIRECT_URI
+            }
+        )
+        
+        data = response.json()
+        
+        if not data.get('ok'):
+            return f"Error: {data.get('error', 'Unknown error')}", 400
+        
+        # Store the token for this user
+        team_id = data['team']['id']
+        user_tokens[team_id] = {
+            'access_token': data['access_token'],
+            'team_id': data['team']['id'],
+            'team_name': data['team']['name']
+        }
+        
+        # Store user ID in session
+        session['user_id'] = team_id
+        
+        return redirect('/')
+        
+    except Exception as e:
+        return f"Error during OAuth: {str(e)}", 500
+
+@app.route('/slack/logout')
+def slack_logout():
+    user_id = session.get('user_id')
+    if user_id and user_id in user_tokens:
+        del user_tokens[user_id]
+    session.clear()
+    return redirect('/')
 
 @app.route('/generate', methods=['POST'])
 def generate():
+    if not is_authenticated():
+        return jsonify({'success': False, 'error': 'Please authorize with Slack first'})
+    
     try:
         data = request.json
         prompt = data.get('prompt', '')
@@ -413,7 +625,6 @@ def generate():
         
         message = generate_message(prompt)
         
-        # Check if error occurred
         if message.startswith("Error"):
             return jsonify({'success': False, 'error': message})
         
@@ -426,6 +637,9 @@ def generate():
 
 @app.route('/post', methods=['POST'])
 def post():
+    if not is_authenticated():
+        return jsonify({'success': False, 'error': 'Please authorize with Slack first'})
+    
     try:
         data = request.json
         message = data.get('message', '')
