@@ -97,6 +97,14 @@ def post_to_slack(message_text, channel_id):
         if not is_valid:
             return False, validation_msg
         
+        try:
+            # Try to join the channel first (works for public channels)
+            client.conversations_join(channel=channel_id)
+        except SlackApiError as join_err:
+            # If it's a private channel, joining will fail. We'll proceed to post
+            # and let the main error handler catch it if the bot still isn't in there.
+            print(f"⚠️ Join attempt status: {join_err.response['error']}")
+
         response = client.chat_postMessage(
             channel=channel_id,
             text=message_text
@@ -105,7 +113,10 @@ def post_to_slack(message_text, channel_id):
         return True, "Message posted successfully! ✅"
     
     except SlackApiError as e:
-        return False, f"Slack error: {e.response['error']}"
+        error_code = e.response['error']
+        if error_code == 'not_in_channel':
+            return False, "Slack error: not_in_channel. Please invite the bot to this channel by typing '/invite @YourBotName' in the Slack channel."
+        return False, f"Slack error: {error_code}"
     except Exception as e:
         return False, f"Error: {str(e)}"
 
@@ -588,7 +599,7 @@ def slack_install():
     slack_auth_url = (
         f"https://slack.com/oauth/v2/authorize?"
         f"client_id={SLACK_CLIENT_ID}&"
-        f"scope=chat:write,channels:read&"
+        f"scope=chat:write,channels:read,channels:join&"
         f"redirect_uri={REDIRECT_URI}"
     )
     print(f"🔗 Redirecting to Slack OAuth: {slack_auth_url}")
