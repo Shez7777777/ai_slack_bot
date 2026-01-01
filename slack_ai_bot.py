@@ -13,12 +13,12 @@ def setup_slack():
     slack_token = os.environ.get('SLACK_BOT_TOKEN')
     return WebClient(token=slack_token)
 
-# Setup Groq AI
+# Setup Groq AI - FIXED VERSION
 def setup_groq():
     groq_api_key = os.environ.get('GROQ_API_KEY')
     return Groq(api_key=groq_api_key)
 
-# Generate message with AI
+# Generate message with AI - FIXED VERSION
 def generate_message(prompt):
     try:
         client = setup_groq()
@@ -270,7 +270,7 @@ HTML_TEMPLATE = '''
         
         <div class="input-group">
             <label>📝 Channel ID</label>
-            <input type="text" id="channelId" placeholder="e.g., C01234567AB" />
+            <input type="text" id="channelId" placeholder="e.g., C01234567AB" value="C0A768RCK5W" />
         </div>
         
         <div class="input-group">
@@ -404,6 +404,10 @@ def generate():
             return jsonify({'success': False, 'error': 'Prompt is required'})
         
         message = generate_message(prompt)
+        
+        # Check if error occurred
+        if message.startswith("Error generating message"):
+            return jsonify({'success': False, 'error': message})
         
         return jsonify({
             'success': True,
