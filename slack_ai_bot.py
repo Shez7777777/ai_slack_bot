@@ -1,4 +1,4 @@
-# slack_ai_bot.py (Updated with OAuth)
+# slack_ai_bot.py (Fixed OAuth with better error handling)
 import os
 import requests
 from slack_sdk import WebClient
@@ -14,7 +14,11 @@ user_tokens = {}
 # Slack OAuth Configuration
 SLACK_CLIENT_ID = os.environ.get('SLACK_CLIENT_ID')
 SLACK_CLIENT_SECRET = os.environ.get('SLACK_CLIENT_SECRET')
-REDIRECT_URI = os.environ.get('REDIRECT_URI', 'https://your-app.onrender.com/slack/oauth_redirect')
+REDIRECT_URI = os.environ.get('REDIRECT_URI', 'https://ai-slack-bot-026c.onrender.com/slack/oauth_redirect')
+
+print(f"🔧 Configuration loaded:")
+print(f"   Client ID: {SLACK_CLIENT_ID[:10]}..." if SLACK_CLIENT_ID else "   Client ID: NOT SET")
+print(f"   Redirect URI: {REDIRECT_URI}")
 
 # Get Slack client for current user
 def get_slack_client():
@@ -26,7 +30,9 @@ def get_slack_client():
 # Check if user is authenticated
 def is_authenticated():
     user_id = session.get('user_id')
-    return user_id and user_id in user_tokens
+    is_auth = user_id and user_id in user_tokens
+    print(f"🔍 Auth check - User ID: {user_id}, Authenticated: {is_auth}")
+    return is_auth
 
 # Generate message with AI
 def generate_message(prompt):
@@ -212,6 +218,16 @@ HTML_TEMPLATE = '''
             font-size: 14px;
         }
         
+        .debug-info {
+            margin-top: 10px;
+            padding: 10px;
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 5px;
+            font-size: 12px;
+            text-align: left;
+        }
+        
         .input-group {
             margin-bottom: 20px;
         }
@@ -382,6 +398,12 @@ HTML_TEMPLATE = '''
                          alt="Add to Slack" 
                          style="vertical-align: middle; height: 40px;">
                 </a>
+                {% if debug_message %}
+                <div class="debug-info">
+                    <strong>Debug Info:</strong><br>
+                    {{ debug_message }}
+                </div>
+                {% endif %}
             {% endif %}
         </div>
         
@@ -538,17 +560,26 @@ def home():
     authenticated = is_authenticated()
     workspace_name = ""
     team_name = ""
+    debug_message = ""
+    
+    # Check if we just came from OAuth
+    if 'oauth_error' in session:
+        debug_message = session.pop('oauth_error')
     
     if authenticated:
         user_id = session.get('user_id')
         workspace_name = user_tokens[user_id].get('team_name', 'Unknown')
         team_name = user_tokens[user_id].get('team_id', 'Unknown')
+        print(f"✅ User {user_id} is authenticated")
+    else:
+        print("❌ User is not authenticated")
     
     return render_template_string(
         HTML_TEMPLATE, 
         authenticated=authenticated,
         workspace_name=workspace_name,
-        team_name=team_name
+        team_name=team_name,
+        debug_message=debug_message
     )
 
 @app.route('/slack/install')
@@ -560,18 +591,35 @@ def slack_install():
         f"scope=chat:write,channels:read&"
         f"redirect_uri={REDIRECT_URI}"
     )
+    print(f"🔗 Redirecting to Slack OAuth: {slack_auth_url}")
     return redirect(slack_auth_url)
 
 @app.route('/slack/oauth_redirect')
 def slack_oauth_redirect():
+    print("=" * 50)
+    print("🔄 OAuth redirect received")
+    
     # Get the authorization code from Slack
     code = request.args.get('code')
+    error = request.args.get('error')
+    
+    if error:
+        error_msg = f"Slack OAuth error: {error}"
+        print(f"❌ {error_msg}")
+        session['oauth_error'] = error_msg
+        return redirect('/')
     
     if not code:
-        return "Error: No authorization code received", 400
+        error_msg = "No authorization code received from Slack"
+        print(f"❌ {error_msg}")
+        session['oauth_error'] = error_msg
+        return redirect('/')
+    
+    print(f"✅ Received authorization code: {code[:20]}...")
     
     try:
         # Exchange code for access token
+        print("📤 Exchanging code for access token...")
         response = requests.post(
             'https://slack.com/api/oauth.v2.access',
             data={
@@ -583,31 +631,51 @@ def slack_oauth_redirect():
         )
         
         data = response.json()
+        print(f"📥 Slack API response: {data.get('ok', False)}")
         
         if not data.get('ok'):
-            return f"Error: {data.get('error', 'Unknown error')}", 400
+            error_msg = f"Slack API error: {data.get('error', 'Unknown error')}"
+            print(f"❌ {error_msg}")
+            session['oauth_error'] = error_msg
+            return redirect('/')
         
         # Store the token for this user
         team_id = data['team']['id']
+        team_name = data['team']['name']
+        access_token = data['access_token']
+        
+        print(f"✅ Successfully authenticated:")
+        print(f"   Team ID: {team_id}")
+        print(f"   Team Name: {team_name}")
+        
         user_tokens[team_id] = {
-            'access_token': data['access_token'],
-            'team_id': data['team']['id'],
-            'team_name': data['team']['name']
+            'access_token': access_token,
+            'team_id': team_id,
+            'team_name': team_name
         }
         
         # Store user ID in session
         session['user_id'] = team_id
+        session.permanent = True  # Make session permanent
+        
+        print(f"✅ Session created for user: {team_id}")
+        print(f"✅ Total users in memory: {len(user_tokens)}")
+        print("=" * 50)
         
         return redirect('/')
         
     except Exception as e:
-        return f"Error during OAuth: {str(e)}", 500
+        error_msg = f"Error during OAuth: {str(e)}"
+        print(f"❌ {error_msg}")
+        session['oauth_error'] = error_msg
+        return redirect('/')
 
 @app.route('/slack/logout')
 def slack_logout():
     user_id = session.get('user_id')
     if user_id and user_id in user_tokens:
         del user_tokens[user_id]
+        print(f"🚪 User {user_id} logged out")
     session.clear()
     return redirect('/')
 
@@ -661,7 +729,17 @@ def post():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
+# Debug route to check session
+@app.route('/debug')
+def debug():
+    return jsonify({
+        'session_user_id': session.get('user_id'),
+        'total_users': len(user_tokens),
+        'is_authenticated': is_authenticated(),
+        'user_ids': list(user_tokens.keys())
+    })
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
+    print(f"🚀 Starting AI Slack Bot on port {port}")
     app.run(host='0.0.0.0', port=port)
-
