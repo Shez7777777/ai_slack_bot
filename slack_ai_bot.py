@@ -1,8 +1,8 @@
 # slack_ai_bot.py
 import os
+import requests
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
-from groq import Groq
 from flask import Flask, render_template_string, request, jsonify
 
 # Initialize
@@ -13,38 +13,43 @@ def setup_slack():
     slack_token = os.environ.get('SLACK_BOT_TOKEN')
     return WebClient(token=slack_token)
 
-# Setup Groq AI - FIXED VERSION
-def setup_groq():
-    groq_api_key = os.environ.get('GROQ_API_KEY')
-    return Groq(api_key=groq_api_key)
-
-# Generate message with AI - FIXED VERSION
+# Generate message with AI using direct API call (MORE RELIABLE)
 def generate_message(prompt):
     try:
-        client = setup_groq()
+        groq_api_key = os.environ.get('GROQ_API_KEY')
         
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {
-                    "role": "system",
-                    "content": """You are an expert content creator. Create engaging, 
-                    professional messages based on the user's prompt. Keep it concise 
-                    and impactful. Add relevant emojis where appropriate."""
-                },
-                {
-                    "role": "user",
-                    "content": f"Create a message about: {prompt}"
-                }
-            ],
-            model="llama-3.3-70b-versatile",
-            temperature=0.7,
-            max_tokens=500
+        # Direct API call to Groq
+        response = requests.post(
+            'https://api.groq.com/openai/v1/chat/completions',
+            headers={
+                'Authorization': f'Bearer {groq_api_key}',
+                'Content-Type': 'application/json'
+            },
+            json={
+                'model': 'llama-3.3-70b-versatile',
+                'messages': [
+                    {
+                        'role': 'system',
+                        'content': 'You are an expert content creator. Create engaging, professional messages based on the user prompt. Keep it concise and impactful. Add relevant emojis where appropriate.'
+                    },
+                    {
+                        'role': 'user',
+                        'content': f'Create a message about: {prompt}'
+                    }
+                ],
+                'temperature': 0.7,
+                'max_tokens': 500
+            }
         )
         
-        message = chat_completion.choices[0].message.content.strip()
-        message = message.replace('"', '').replace("'", "")
-        
-        return message
+        if response.status_code == 200:
+            data = response.json()
+            message = data['choices'][0]['message']['content'].strip()
+            message = message.replace('"', '').replace("'", "")
+            return message
+        else:
+            return f"Error: API returned status {response.status_code}"
+            
     except Exception as e:
         return f"Error generating message: {str(e)}"
 
@@ -53,7 +58,10 @@ def validate_message(message_text):
     if not message_text or len(message_text.strip()) == 0:
         return False, "Message cannot be empty"
     
-    if len(message_text) > 3000:  # Slack limit
+    if message_text.startswith("Error"):
+        return False, message_text
+    
+    if len(message_text) > 3000:
         return False, f"Message too long ({len(message_text)} characters, max 3000)"
     
     return True, "Valid"
@@ -406,7 +414,7 @@ def generate():
         message = generate_message(prompt)
         
         # Check if error occurred
-        if message.startswith("Error generating message"):
+        if message.startswith("Error"):
             return jsonify({'success': False, 'error': message})
         
         return jsonify({
